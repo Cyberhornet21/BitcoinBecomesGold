@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>₿ Bitcoin Tracker</title>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #050a0e;
+      --surface: #0b1419;
+      --border: #1a2e3b;
+      --orange: #f7931a;
+      --orange-dim: rgba(247,147,26,0.15);
+      --orange-glow: rgba(247,147,26,0.4);
+      --green: #00ff88;
+      --red: #ff4466;
+      --text: #c8d8e0;
+      --muted: #4a6070;
+      --mono: 'Share Tech Mono', monospace;
+      --display: 'Orbitron', sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow-x: hidden;
+    }
+
+    /* Grid overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(247,147,26,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(247,147,26,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 540px;
+      padding: 2rem 1.5rem;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+
+    .btc-symbol {
+      font-family: var(--display);
+      font-size: 3.5rem;
+      font-weight: 900;
+      color: var(--orange);
+      text-shadow: 0 0 30px var(--orange-glow), 0 0 60px var(--orange-glow);
+      letter-spacing: -2px;
+      animation: pulse-glow 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { text-shadow: 0 0 20px var(--orange-glow), 0 0 40px var(--orange-glow); }
+      50% { text-shadow: 0 0 40px var(--orange-glow), 0 0 80px var(--orange-glow), 0 0 100px rgba(247,147,26,0.2); }
+    }
+
+    .header-sub {
+      font-size: 0.65rem;
+      letter-spacing: 0.35em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-top: 0.4rem;
+    }
+
+    /* Price card */
+    .price-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 1px solid rgba(247,147,26,0.3);
+      padding: 2rem;
+      position: relative;
+      margin-bottom: 1.5rem;
+    }
+
+    .price-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--orange), transparent);
+    }
+
+    .price-label {
+      font-size: 0.6rem;
+      letter-spacing: 0.3em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 0.75rem;
+    }
+
+    .price-value {
+      font-family: var(--display);
+      font-size: 2.8rem;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -1px;
+      transition: all 0.4s ease;
+      min-height: 3.5rem;
+      display: flex;
+      align-items: center;
+    }
+
+    .price-value.flash-up { color: var(--green); }
+    .price-value.flash-down { color: var(--red); }
+
+    .price-meta {
+      display: flex;
+      gap: 2rem;
+      margin-top: 1.25rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.75rem;
+    }
+
+    .meta-item { display: flex; flex-direction: column; gap: 0.25rem; }
+    .meta-label { color: var(--muted); font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; }
+    .meta-value { color: var(--text); }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+
+    /* Controls */
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+      gap: 1rem;
+    }
+
+    .refresh-btn {
+      background: var(--orange-dim);
+      border: 1px solid var(--orange);
+      color: var(--orange);
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 0.6rem 1.2rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .refresh-btn:hover {
+      background: rgba(247,147,26,0.25);
+      box-shadow: 0 0 15px var(--orange-glow);
+    }
+
+    .refresh-btn:active { transform: scale(0.97); }
+
+    .refresh-btn.loading { opacity: 0.5; cursor: not-allowed; }
+
+    .refresh-btn .spinner {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border: 1px solid var(--orange);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Debug toggle */
+    .debug-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .debug-toggle:hover { color: var(--text); }
+
+    .toggle-track {
+      width: 36px; height: 18px;
+      background: var(--border);
+      border: 1px solid var(--muted);
+      border-radius: 9px;
+      position: relative;
+      transition: all 0.25s;
+    }
+
+    .toggle-track.active {
+      background: rgba(0,255,136,0.15);
+      border-color: var(--green);
+    }
+
+    .toggle-thumb {
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 12px; height: 12px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: all 0.25s;
+    }
+
+    .toggle-track.active .toggle-thumb {
+      left: 20px;
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(0,255,136,0.5);
+    }
+
+    /* Debug panel */
+    .debug-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--green);
+      padding: 1rem 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.7;
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.4s ease, opacity 0.3s ease;
+      opacity: 0;
+    }
+
+    .debug-panel.open {
+      max-height: 600px;
+      opacity: 1;
+    }
+
+    .debug-title {
+      color: var(--green);
+      font-size: 0.6rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      margin-bottom: 0.75rem;
+    }
+
+    .debug-line {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.2rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      align-items: flex-start;
+    }
+
+    .debug-line:last-child { border-bottom: none; }
+
+    .debug-time { color: var(--muted); white-space: nowrap; min-width: 70px; }
+    .debug-status {
+      min-width: 14px;
+      text-align: center;
+    }
+
+    .status-ok { color: var(--green); }
+    .status-err { color: var(--red); }
+    .status-wait { color: var(--orange); }
+
+    .debug-msg { color: var(--text); word-break: break-all; }
+    .debug-key { color: var(--orange); }
+    .debug-val { color: #7dd3fc; }
+
+    /* Timestamp */
+    .last-update {
+      text-align: center;
+      font-size: 0.6rem;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      margin-top: 1.25rem;
+    }
+
+    #update-time { color: var(--text); }
+
+    /* Cursor blink */
+    .blink {
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="btc-symbol">₿</div>
+    <div class="header-sub">Bitcoin Live Tracker &nbsp;/&nbsp; CoinGecko API</div>
+  </div>
+
+  <div class="price-card">
+    <div class="price-label">Aktueller Preis (USD)</div>
+    <div class="price-value" id="price">–<span class="blink">_</span></div>
+    <div class="price-meta">
+      <div class="meta-item">
+        <span class="meta-label">24h Änderung</span>
+        <span class="meta-value" id="change">–</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">24h Hoch</span>
+        <span class="meta-value" id="high">–</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">24h Tief</span>
+        <span class="meta-value" id="low">–</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="refresh-btn" id="refresh-btn" onclick="fetchBitcoin()">
+      ▶ Aktualisieren
+    </button>
+    <label class="debug-toggle" onclick="toggleDebug()">
+      <div class="toggle-track" id="toggle-track">
+        <div class="toggle-thumb"></div>
+      </div>
+      Debug
+    </label>
+  </div>
+
+  <div class="debug-panel" id="debug-panel">
+    <div class="debug-title">// Debug Log</div>
+    <div id="debug-log"></div>
+  </div>
+
+  <div class="last-update">Letztes Update: <span id="update-time">–</span></div>
+</div>
+
+<script>
+  let debugMode = false;
+  let lastPrice = null;
+
+  function toggleDebug() {
+    debugMode = !debugMode;
+    document.getElementById('toggle-track').classList.toggle('active', debugMode);
+    document.getElementById('debug-panel').classList.toggle('open', debugMode);
+    if (debugMode) addDebugLine('ℹ', 'Debug-Modus aktiviert', 'wait');
+  }
+
+  function now() {
+    return new Date().toLocaleTimeString('de-DE', { hour12: false });
+  }
+
+  function addDebugLine(symbol, msg, type = 'ok') {
+    if (!debugMode) return;
+    const log = document.getElementById('debug-log');
+    const line = document.createElement('div');
+    line.className = 'debug-line';
+    line.innerHTML = `
+      <span class="debug-time">[${now()}]</span>
+      <span class="debug-status status-${type}">${symbol}</span>
+      <span class="debug-msg">${msg}</span>
+    `;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function kv(key, val) {
+    return `<span class="debug-key">${key}</span>: <span class="debug-val">${val}</span>`;
+  }
+
+  function fmt(n) {
+    return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n);
+  }
+
+  async function fetchBitcoin() {
+    const btn = document.getElementById('refresh-btn');
+    const priceEl = document.getElementById('price');
+
+    btn.classList.add('loading');
+    btn.innerHTML = '<span class="spinner"></span>Lädt...';
+
+    addDebugLine('→', 'Starte API-Anfrage...', 'wait');
+    addDebugLine('→', kv('Endpunkt', 'https://api.coingecko.com/api/v3/coins/markets'), 'wait');
+    addDebugLine('→', kv('Parameter', 'vs_currency=usd&ids=bitcoin'), 'wait');
+
+    const url = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin';
+
+    try {
+      addDebugLine('⏳', 'fetch() wird aufgerufen...', 'wait');
+      const response = await fetch(url);
+
+      addDebugLine('✓', kv('HTTP Status', `${response.status} ${response.statusText}`), response.ok ? 'ok' : 'err');
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      addDebugLine('⏳', 'Response wird als JSON geparst...', 'wait');
+      const data = await response.json();
+
+      addDebugLine('✓', kv('Antwort-Array Länge', data.length), 'ok');
+
+      const btc = data[0];
+      addDebugLine('✓', kv('coin.id', btc.id), 'ok');
+      addDebugLine('✓', kv('coin.symbol', btc.symbol.toUpperCase()), 'ok');
+      addDebugLine('✓', kv('current_price', btc.current_price), 'ok');
+      addDebugLine('✓', kv('price_change_percentage_24h', btc.price_change_percentage_24h?.toFixed(4) + '%'), 'ok');
+      addDebugLine('✓', kv('high_24h', btc.high_24h), 'ok');
+      addDebugLine('✓', kv('low_24h', btc.low_24h), 'ok');
+
+      // Price flash animation
+      const newPrice = btc.current_price;
+      if (lastPrice !== null) {
+        const dir = newPrice > lastPrice ? 'flash-up' : newPrice < lastPrice ? 'flash-down' : '';
+        if (dir) {
+          priceEl.classList.add(dir);
+          setTimeout(() => priceEl.classList.remove(dir), 800);
+        }
+      }
+      lastPrice = newPrice;
+
+      // Render price
+      priceEl.innerHTML = fmt(newPrice);
+
+      // 24h change
+      const changeEl = document.getElementById('change');
+      const chg = btc.price_change_percentage_24h;
+      const sign = chg >= 0 ? '+' : '';
+      changeEl.textContent = `${sign}${chg?.toFixed(2)}%`;
+      changeEl.className = 'meta-value ' + (chg >= 0 ? 'positive' : 'negative');
+
+      document.getElementById('high').textContent = fmt(btc.high_24h);
+      document.getElementById('low').textContent = fmt(btc.low_24h);
+      document.getElementById('update-time').textContent = now();
+
+      addDebugLine('✓', 'UI erfolgreich aktualisiert ✓', 'ok');
+
+    } catch (err) {
+      addDebugLine('✗', kv('Fehler', err.message), 'err');
+      priceEl.innerHTML = '<span style="color:var(--red);font-size:1.5rem">API Fehler</span>';
+    }
+
+    btn.classList.remove('loading');
+    btn.innerHTML = '▶ Aktualisieren';
+  }
+
+  // Initial load
+  fetchBitcoin();
+</script>
+</body>
+</html>
