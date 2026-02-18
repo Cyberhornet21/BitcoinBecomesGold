@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Bitcoin Seasons</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+canvas { display:block; position:fixed; top:0; left:0; width:100%; height:100%; }
+
+#footer {
+  position:fixed; bottom:0; left:0; right:0; height:64px;
+  display:flex; align-items:center; justify-content:center;
+  opacity:0; transition:opacity 1.5s ease; z-index:20;
+  background:linear-gradient(transparent, rgba(0,0,0,0.28));
+}
+#footer.visible { opacity:1; }
+.fi {
+  display:flex; flex-direction:column; align-items:center;
+  gap:3px; padding:0 4vw; position:relative;
+}
+.fi+.fi::before {
+  content:''; position:absolute; left:0; top:20%; height:60%;
+  width:1px; background:rgba(255,255,255,0.1);
+}
+.fl {
+  font-family:'Georgia',serif; font-size:0.42rem; letter-spacing:0.4em;
+  text-transform:uppercase; color:rgba(255,255,255,0.28); user-select:none;
+}
+.fv {
+  font-family:'Georgia',serif; font-size:clamp(0.8rem,1.7vw,1.1rem);
+  letter-spacing:0.05em; color:rgba(255,255,255,0.58);
+  border:none; background:transparent; outline:none;
+  text-align:center; width:16ch;
+  border-bottom:1px solid transparent;
+  transition:color 0.3s, border-bottom 0.2s;
+  caret-color:rgba(255,255,255,0.8);
+}
+.fv:hover {
+  color:rgba(255,255,255,0.9);
+  border-bottom:1px solid rgba(255,255,255,0.15);
+  cursor:pointer;
+}
+.fv:focus { color:#fff; border-bottom:1px solid rgba(255,255,255,0.4); cursor:text; }
+.fi.cur .fv { color:rgba(255,255,255,0.85); font-style:italic; font-size:clamp(0.9rem,1.9vw,1.2rem); }
+@keyframes vf { 0%{color:rgba(160,220,255,1)} 100%{color:rgba(255,255,255,0.58)} }
+.fv.flash { animation:vf 1s ease forwards; }
+
+#loader {
+  position:fixed; inset:0; background:#0d1a2a;
+  display:flex; align-items:center; justify-content:center;
+  z-index:100; transition:opacity 1.5s ease;
+}
+#loader.fade { opacity:0; pointer-events:none; }
+.lt {
+  font-family:'Georgia',serif; font-size:0.8rem; letter-spacing:0.55em;
+  text-transform:uppercase; color:rgba(255,255,255,0.2);
+  animation:lp 2.5s ease-in-out infinite;
+}
+@keyframes lp { 0%,100%{opacity:0.2} 50%{opacity:0.7} }
+</style>
+</head>
+<body>
+
+<canvas id="bg"></canvas>
+<div id="loader"><div class="lt">Bitcoin Seasons</div></div>
+
+<div id="footer">
+  <div class="fi low">
+    <span class="fl">Day Low</span>
+    <input class="fv" id="f-low" type="text" inputmode="numeric" value="--"/>
+  </div>
+  <div class="fi cur">
+    <span class="fl">Current</span>
+    <input class="fv" id="f-price" type="text" inputmode="numeric" value="--"/>
+  </div>
+  <div class="fi high">
+    <span class="fl">Day High</span>
+    <input class="fv" id="f-high" type="text" inputmode="numeric" value="--"/>
+  </div>
+</div>
+
+<script>
+// ================================================================
+//  SEASON MAPPING:
+//    p = (current - low) / (high - low)
+//    p = 0.0  --> deep winter
+//    p = 0.5  --> spring
+//    p = 1.0  --> high summer
+//
+//  VOLATILITY:
+//    vol = clamp((range/price*15), 0, 1)
+//    motion = clamp(vol / 0.20, 0, 1)  --> 0% vol = no motion, 20%+ = full motion
+// ================================================================
+
+const canvas = document.getElementById('bg');
+const ctx    = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ---- math helpers ----
+const lerp  = (a,b,t) => a + (b-a)*t;
+const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+
+function lc(t, a, b) {
+  return [
+    lerp(a[0], b[0], t),
+    lerp(a[1], b[1], t),
+    lerp(a[2], b[2], t),
+  ];
+}
+function rgb(c, a) {
+  const al = (a === undefined) ? 1 : a;
+  return 'rgba(' + (c[0]|0) + ',' + (c[1]|0) + ',' + (c[2]|0) + ',' + al + ')';
+}
+// season blend: p=0 winter, p=0.5 spring, p=1 summer
+function sc(p, win, spr, sum) {
+  if (p <= 0.5) return lc(p / 0.5, win, spr);
+  return              lc((p - 0.5) / 0.5, spr, sum);
+}
+
+// ---- state ----
+const S = {
+  price:  97000,
+  high:   99000,
+  low:    94000,
+  pos:    0.5,   // season position 0..1
+  vol:    0.3,   // raw volatility 0..1
+  motion: 0.0,   // capped motion driver: 0 = still, 1 = max
+  smoothPos:  0.5,
+  targetPos:  0.5,
+  smoothMotion: 0.0,
+  time:   0,
+  loaded: false,
+  priceStr: '',
+};
+
+// ---- particle pools ----
+const snowflakes = Array.from({length: 90}, function() {
+  return {
+    x: Math.random(), y: Math.random(),
+    r: 3 + Math.random() * 5,
+    speed: 0.0018 + Math.random() * 0.0025,
+    wobble: (Math.random() - 0.5) * 0.0008,
+    phase: Math.random() * Math.PI * 2,
+  };
+});
+
+const petals = Array.from({length: 35}, function() {
+  return {
+    x: Math.random(), y: Math.random(),
+    speed: 0.0022 + Math.random() * 0.0018,
+    drift: (Math.random() - 0.5) * 0.0015,
+    phase: Math.random() * Math.PI * 2,
+    rot:   Math.random() * Math.PI * 2,
+    rotV:  (Math.random() - 0.5) * 0.04,
+    w: 5 + Math.random() * 4,
+    h: 3 + Math.random() * 2,
+  };
+});
+
+const clouds = [
+  {x:0.08,  y:0.10, w:0.20, h:0.095, spd:0.000055},
+  {x:0.40,  y:0.07, w:0.24, h:0.105, spd:0.000040},
+  {x:0.70,  y:0.12, w:0.18, h:0.090, spd:0.000048},
+  {x:0.25,  y:0.17, w:0.14, h:0.075, spd:0.000062},
+];
+
+const butterflies = Array.from({length: 5}, function(_, i) {
+  return {
+    x:  0.25 + Math.random() * 0.55,
+    y:  0.18 + Math.random() * 0.28,
+    vx: (Math.random() - 0.5) * 0.0012,
+    vy: (Math.random() - 0.5) * 0.0009,
+    phase: Math.random() * Math.PI * 2,
+    size:  0.030 + Math.random() * 0.015,
+    hue:   [0, 280, 30][i % 3],
+  };
+});
+
+const bees = Array.from({length: 5}, function() {
+  return {
+    x:  0.45 + Math.random() * 0.45,
+    y:  0.15 + Math.random() * 0.32,
+    vx: (Math.random() - 0.5) * 0.0018,
+    vy: (Math.random() - 0.5) * 0.0013,
+    phase: Math.random() * Math.PI * 2,
+  };
+});
+
+const raindrops = Array.from({length: 110}, function() {
+  return {
+    x: Math.random(),
+    y: Math.random(),
+    spd: 0.014 + Math.random() * 0.008,
+  };
+});
+
+// ================================================================
+//  DRAWING HELPERS
+// ================================================================
+
+function cloud(cx, cy, cw, ch, col) {
+  ctx.fillStyle = rgb(col);
+  ctx.beginPath(); ctx.ellipse(cx,          cy,          cw*0.42, ch*0.48, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx - cw*0.17, cy - ch*0.08, ch*0.44, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + cw*0.17, cy - ch*0.07, ch*0.41, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx,          cy - ch*0.21, ch*0.48, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx - cw*0.28, cy + ch*0.04, ch*0.33, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + cw*0.28, cy + ch*0.04, ch*0.33, 0, Math.PI*2); ctx.fill();
+}
+
+function mountain(x, baseY, w, h, col, snow) {
+  ctx.fillStyle = rgb(col);
+  ctx.beginPath();
+  ctx.moveTo(x - w*0.5, baseY);
+  ctx.lineTo(x,         baseY - h);
+  ctx.lineTo(x + w*0.5, baseY);
+  ctx.closePath();
+  ctx.fill();
+  // shadow side
+  ctx.fillStyle = rgb(lc(0.32, col, [0,0,0]));
+  ctx.beginPath();
+  ctx.moveTo(x,         baseY - h);
+  ctx.lineTo(x + w*0.5, baseY);
+  ctx.lineTo(x + w*0.08, baseY);
+  ctx.closePath();
+  ctx.fill();
+  // snow cap
+  if (snow > 0.01) {
+    var sh = h * snow * 0.48;
+    ctx.fillStyle = rgb([228, 238, 252], snow);
+    ctx.beginPath();
+    ctx.moveTo(x - w * snow * 0.28, baseY - h + sh);
+    ctx.lineTo(x,                   baseY - h);
+    ctx.lineTo(x + w * snow * 0.28, baseY - h + sh);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function fir(x, baseY, size, col, snow) {
+  // trunk
+  ctx.fillStyle = rgb([55, 35, 15]);
+  ctx.fillRect(x - size*0.07, baseY - size*0.22, size*0.14, size*0.22);
+  // 3 triangle layers
+  var layers = [[0.55, 0.38], [0.42, 0.32], [0.28, 0.28]];
+  for (var i = 0; i < layers.length; i++) {
+    var ly  = baseY - size*0.20 - i * size * 0.28;
+    var lw  = size * layers[i][0];
+    var lh  = size * layers[i][1];
+    ctx.fillStyle = rgb(col);
+    ctx.beginPath();
+    ctx.moveTo(x - lw, ly);
+    ctx.lineTo(x,       ly - lh);
+    ctx.lineTo(x + lw, ly);
+    ctx.closePath();
+    ctx.fill();
+    if (snow > 0.01) {
+      var sw = lw * snow * 0.75;
+      ctx.fillStyle = rgb([228, 238, 252], snow * 0.88);
+      ctx.beginPath();
+      ctx.moveTo(x - sw,  ly - lh*0.22);
+      ctx.lineTo(x,        ly - lh);
+      ctx.lineTo(x + sw,  ly - lh*0.22);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+function snowBush(x, y, r) {
+  ctx.fillStyle = rgb([212, 228, 248], 0.95);
+  ctx.beginPath(); ctx.arc(x,         y,         r*0.50, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x - r*0.36, y + r*0.12, r*0.38, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*0.36, y + r*0.12, r*0.38, 0, Math.PI*2); ctx.fill();
+}
+
+function blossomBush(x, y, r, alpha) {
+  // green body
+  ctx.fillStyle = rgb([75, 148, 58], alpha);
+  ctx.beginPath(); ctx.arc(x, y, r*0.48, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x - r*0.32, y + r*0.12, r*0.36, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*0.32, y + r*0.12, r*0.36, 0, Math.PI*2); ctx.fill();
+  // blossoms
+  var nf = 9;
+  for (var i = 0; i < nf; i++) {
+    var a  = (i / nf) * Math.PI * 2;
+    var fr = r * (0.18 + Math.sin(i*3.7)*0.12 + 0.14);
+    var fx = x + Math.cos(a) * fr;
+    var fy = y + Math.sin(a) * fr * 0.72;
+    ctx.fillStyle = rgb([245, 198, 218], alpha * 0.92);
+    ctx.beginPath(); ctx.arc(fx, fy, r*0.13, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = rgb([255, 235, 180], alpha);
+    ctx.beginPath(); ctx.arc(fx, fy, r*0.055, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function flower(x, y, size, hue) {
+  ctx.save();
+  ctx.translate(x, y);
+  for (var i = 0; i < 5; i++) {
+    ctx.rotate(Math.PI * 2 / 5);
+    ctx.fillStyle = 'hsl(' + hue + ',82%,62%)';
+    ctx.beginPath();
+    ctx.ellipse(0, -size*0.52, size*0.24, size*0.38, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,215,40,0.95)';
+  ctx.beginPath(); ctx.arc(0, 0, size*0.27, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function snowStar(x, y, r, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = rgb([215, 232, 252], alpha);
+  ctx.lineWidth = r * 0.10;
+  ctx.lineCap = 'round';
+  for (var i = 0; i < 6; i++) {
+    ctx.rotate(Math.PI / 3);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -r); ctx.stroke();
+    // cross arms
+    ctx.beginPath(); ctx.moveTo(0, -r*0.50); ctx.lineTo( r*0.25, -r*0.65); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -r*0.50); ctx.lineTo(-r*0.25, -r*0.65); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function butterfly(x, y, size, hue, phase) {
+  ctx.save();
+  ctx.translate(x, y);
+  var flap = Math.sin(phase) * 0.5 + 0.5;
+  var wx   = size * lerp(0.85, 0.08, flap);
+  // upper wings
+  ctx.fillStyle = 'hsla(' + hue + ',80%,45%,0.88)';
+  ctx.beginPath(); ctx.ellipse(-wx, -size*0.28, wx*0.88, size*0.52, -0.28, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( wx, -size*0.28, wx*0.88, size*0.52,  0.28, 0, Math.PI*2); ctx.fill();
+  // lower wings
+  ctx.fillStyle = 'hsla(' + hue + ',70%,32%,0.80)';
+  ctx.beginPath(); ctx.ellipse(-wx*0.65, size*0.22, wx*0.55, size*0.32,  0.28, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( wx*0.65, size*0.22, wx*0.55, size*0.32, -0.28, 0, Math.PI*2); ctx.fill();
+  // body
+  ctx.fillStyle = 'rgba(25,16,8,0.88)';
+  ctx.beginPath(); ctx.ellipse(0, 0, size*0.09, size*0.52, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function bee(x, y, size, phase) {
+  ctx.save();
+  ctx.translate(x, y);
+  // body
+  ctx.fillStyle = 'rgba(240,188,28,0.95)';
+  ctx.beginPath(); ctx.ellipse(0, 0, size*0.48, size*0.32, 0.18, 0, Math.PI*2); ctx.fill();
+  // stripes
+  ctx.fillStyle = 'rgba(25,16,8,0.65)';
+  ctx.fillRect(-size*0.12, -size*0.32, size*0.45, size*0.12);
+  ctx.fillRect(-size*0.12, -size*0.08, size*0.45, size*0.12);
+  // wings
+  var wflap = Math.sin(phase * 5) * 0.4 + 0.6;
+  ctx.fillStyle = 'rgba(195,228,255,' + (wflap * 0.65) + ')';
+  ctx.beginPath(); ctx.ellipse(-size*0.08, -size*0.48, size*0.38, size*0.22, -0.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( size*0.22, -size*0.42, size*0.32, size*0.20,  0.5, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+// ================================================================
+//  MAIN DRAW
+// ================================================================
+function draw() {
+  S.time += 0.010;
+
+  // Smooth season position
+  S.smoothPos    = lerp(S.smoothPos,    S.targetPos,    0.005);
+  // Smooth motion: clamp raw vol at 20% = full motion
+  var motionTarget = clamp(S.vol / 0.20, 0.0, 1.0);
+  S.smoothMotion = lerp(S.smoothMotion, motionTarget, 0.008);
+
+  var p  = S.smoothPos;    // 0=winter, 0.5=spring, 1=summer
+  var mv = S.smoothMotion; // 0=still,  1=full motion
+  var t  = S.time;
+
+  if (!S.loaded) { requestAnimationFrame(draw); return; }
+
+  ctx.clearRect(0, 0, W, H);
+
+  var HORIZON = H * 0.48;
+
+  // ---- cloud base speed (only moves when there is motion) ----
+  var cloudBaseSpd = mv * 0.00007;
+
+  // ================================================================
+  //  SKY gradient
+  // ================================================================
+  var skyTop = sc(p,
+    [140, 185, 215],   // winter: pale blue-grey
+    [88,  188, 240],   // spring: bright light blue
+    [42,  148, 228]    // summer: vivid deep blue
+  );
+  var skyBot = sc(p,
+    [175, 210, 230],
+    [145, 212, 248],
+    [105, 192, 244]
+  );
+  var skyG = ctx.createLinearGradient(0, 0, 0, HORIZON);
+  skyG.addColorStop(0, rgb(skyTop));
+  skyG.addColorStop(1, rgb(skyBot));
+  ctx.fillStyle = skyG;
+  ctx.fillRect(0, 0, W, HORIZON);
+
+  // ================================================================
+  //  SUN
+  // ================================================================
+  // winter: low, small, pale  |  summer: high, large, golden
+  var sunX = W * 0.15;
+  var sunY = lerp(HORIZON * 0.78, HORIZON * 0.20, p);
+  var sunR = lerp(W * 0.042, W * 0.078, p);
+  var sunC = sc(p, [225,232,245], [255,240,175], [255,215,40]);
+
+  // glow
+  var sg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 3.8);
+  sg.addColorStop(0,   rgb(sunC, 0.38));
+  sg.addColorStop(1,   rgb(sunC, 0.0));
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR*3.8, 0, Math.PI*2); ctx.fill();
+
+  // disk
+  ctx.fillStyle = rgb(sunC);
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, Math.PI*2); ctx.fill();
+
+  // summer rays (only when motion > 0 and p > 0.6)
+  if (p > 0.6 && mv > 0.0) {
+    var rayI = (p - 0.6) / 0.4 * mv * 0.12;
+    ctx.save();
+    ctx.translate(sunX, sunY);
+    var nRays = 12;
+    for (var ri = 0; ri < nRays; ri++) {
+      var rAngle = (ri / nRays) * Math.PI * 2 + t * 0.3 * mv;
+      var rLen   = sunR * lerp(2.2, 4.5, p);
+      ctx.save();
+      ctx.rotate(rAngle);
+      var rg = ctx.createLinearGradient(sunR*0.9, 0, rLen, 0);
+      rg.addColorStop(0, rgb(sunC, 0.55));
+      rg.addColorStop(1, rgb(sunC, 0));
+      ctx.fillStyle = rg;
+      ctx.beginPath();
+      ctx.moveTo(sunR*0.9, -sunR*0.18);
+      ctx.lineTo(rLen,       0);
+      ctx.lineTo(sunR*0.9,   sunR*0.18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  // ================================================================
+  //  CLOUDS  (speed driven by motion)
+  // ================================================================
+  var cloudC = sc(p,
+    [198, 218, 232],   // winter: slightly blue-white
+    [248, 252, 255],   // spring: white
+    [255, 255, 255]    // summer: bright white
+  );
+  clouds.forEach(function(cl) {
+    cl.x += cl.spd + cloudBaseSpd;
+    if (cl.x > 1.18) cl.x = -0.18;
+    cloud(cl.x * W, cl.y * H, cl.w * W, cl.h * H, cloudC);
+  });
+
+  // ================================================================
+  //  MOUNTAINS (2 layers)
+  // ================================================================
+  // snow cap: full at winter, gone at summer
+  var snowCap = clamp(1.0 - p * 2.2, 0.0, 1.0);
+
+  var mtnFar = sc(p,
+    [148, 162, 182],   // winter: blue-grey
+    [162, 152, 122],   // spring: warm tan
+    [148, 132, 100]    // summer: sandy tan
+  );
+  var mtnNear = sc(p,
+    [122, 138, 158],
+    [138, 128, 98],
+    [122, 108, 78]
+  );
+
+  mountain(W*0.22,  HORIZON, W*0.28, H*0.40, mtnFar,  snowCap);
+  mountain(W*0.52,  HORIZON, W*0.26, H*0.36, mtnFar,  snowCap);
+  mountain(W*0.78,  HORIZON, W*0.30, H*0.42, mtnFar,  snowCap);
+  mountain(W*0.96,  HORIZON, W*0.22, H*0.32, mtnFar,  snowCap*0.8);
+  mountain(W*0.06,  HORIZON, W*0.18, H*0.26, mtnNear, snowCap*0.7);
+  mountain(W*0.68,  HORIZON, W*0.20, H*0.29, mtnNear, snowCap*0.6);
+
+  // ================================================================
+  //  GROUND
+  // ================================================================
+  var gndTop = sc(p,
+    [178, 200, 222],   // winter: snow white-blue
+    [92,  162, 72],    // spring: fresh green
+    [65,  142, 50]     // summer: deep green
+  );
+  var gndBot = sc(p,
+    [155, 182, 208],
+    [68,  132, 52],
+    [48,  118, 36]
+  );
+  var gg = ctx.createLinearGradient(0, HORIZON, 0, H);
+  gg.addColorStop(0, rgb(gndTop));
+  gg.addColorStop(1, rgb(gndBot));
+  ctx.fillStyle = gg;
+  ctx.fillRect(0, HORIZON, W, H - HORIZON);
+
+  // ================================================================
+  //  FIR TREES  (two rows)
+  // ================================================================
+  var firC = sc(p,
+    [52,  102,  78],   // winter
+    [58,  138,  72],   // spring
+    [42,  128,  58]    // summer
+  );
+  var firDark = lc(0.28, firC, [0,0,0]);
+
+  var backRow = [0.04,0.11,0.19,0.29,0.60,0.68,0.76,0.84,0.92,0.98];
+  backRow.forEach(function(fx, i) {
+    var sz = H * (0.12 + ((i*37)%10)/10 * 0.055);
+    fir(fx*W, HORIZON + sz*0.08, sz, firDark, snowCap*0.65);
+  });
+
+  var frontRow = [0.0, 0.08, 0.15, 0.63, 0.71, 0.79, 0.87, 0.95];
+  frontRow.forEach(function(fx, i) {
+    var sz = H * (0.17 + ((i*53)%10)/10 * 0.065);
+    fir(fx*W, HORIZON + sz*0.14 + H*0.10, sz, firC, snowCap*0.82);
+  });
+
+  // ================================================================
+  //  RIVER PATH
+  // ================================================================
+  var riverC = sc(p, [148,195,225], [95,162,215], [82,152,210]);
+  ctx.save();
+  ctx.strokeStyle = rgb(riverC, 0.72);
+  ctx.lineWidth   = W * 0.024;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(W*0.50, H*0.99);
+  ctx.bezierCurveTo(W*0.48, H*0.85, W*0.52, H*0.78, W*0.49, H*0.72);
+  ctx.bezierCurveTo(W*0.46, H*0.68, W*0.44, H*0.65, W*0.46, H*0.62);
+  ctx.stroke();
+  // bank highlight
+  ctx.strokeStyle = rgb(lc(0.4, riverC, [255,255,255]), 0.32);
+  ctx.lineWidth   = W * 0.003;
+  ctx.stroke();
+  ctx.restore();
+
+  // ================================================================
+  //  WINTER ELEMENTS  (p < 0.38)
+  // ================================================================
+  if (p < 0.38) {
+    var wi = clamp(1.0 - p / 0.38, 0, 1);
+
+    // snow bushes
+    var bushPos = [[0.37,0.82],[0.53,0.85],[0.61,0.80],[0.70,0.84]];
+    bushPos.forEach(function(b) {
+      snowBush(b[0]*W, b[1]*H, H * 0.048 * wi);
+    });
+
+    // large decorative snowflake stars
+    var starPos = [[0.18,0.18],[0.34,0.11],[0.51,0.21],[0.67,0.14],[0.82,0.20]];
+    starPos.forEach(function(s, i) {
+      var wobbleX = Math.sin(t * 0.4 + i * 1.2) * 0.010 * mv;
+      var wobbleY = Math.cos(t * 0.35 + i * 0.9) * 0.008 * mv;
+      snowStar((s[0]+wobbleX)*W, (s[1]+wobbleY)*H, H*0.052*wi, wi*0.82);
+    });
+
+    // falling snow particles (only when motion > 0)
+    snowflakes.forEach(function(sf) {
+      sf.y += sf.speed * mv;
+      sf.x += sf.wobble * mv + Math.sin(t * 0.8 + sf.phase) * 0.0004 * mv;
+      if (sf.y > 1.02) { sf.y = -0.02; sf.x = Math.random(); }
+      if (sf.x >  1.0) sf.x = 0;
+      if (sf.x <  0.0) sf.x = 1;
+      var pulse = 0.72 + Math.sin(sf.phase + t) * 0.28;
+      ctx.fillStyle = rgb([222, 235, 252], wi * 0.78 * pulse);
+      ctx.beginPath();
+      ctx.arc(sf.x*W, sf.y*H, sf.r * 0.55 * wi, 0, Math.PI*2);
+      ctx.fill();
+    });
+  }
+
+  // ================================================================
+  //  SPRING ELEMENTS  (0.18 < p < 0.75)
+  // ================================================================
+  if (p > 0.18 && p < 0.75) {
+    var si = (p < 0.5)
+      ? clamp((p - 0.18) / 0.32, 0, 1)
+      : clamp((0.75 - p) / 0.25, 0, 1);
+
+    // blossom bushes
+    [[0.35,0.82,1.0],[0.47,0.87,0.95],[0.55,0.83,0.9]].forEach(function(b) {
+      blossomBush(b[0]*W, b[1]*H, H*0.062*b[2], si*0.88);
+    });
+
+    // falling petals (move only with motion)
+    petals.forEach(function(pt) {
+      pt.y   += pt.speed  * mv;
+      pt.x   += pt.drift  * mv + Math.sin(t*0.6 + pt.phase) * 0.0009 * mv;
+      pt.rot += pt.rotV   * mv;
+      if (pt.y > 1.02) { pt.y = -0.02; pt.x = Math.random(); }
+      if (pt.x >  1.0) pt.x = 0;
+      if (pt.x <  0.0) pt.x = 1;
+      ctx.save();
+      ctx.translate(pt.x*W, pt.y*H);
+      ctx.rotate(pt.rot);
+      ctx.fillStyle = rgb([245, 195, 215], si * 0.68);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, pt.w, pt.h, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    });
+
+    // bees (move only with motion)
+    bees.forEach(function(b, i) {
+      if (mv > 0.02) {
+        b.x += b.vx * mv;
+        b.y += b.vy * mv + Math.sin(t*1.5 + b.phase) * 0.0004 * mv;
+        if (b.x > 0.96) b.vx *= -1;
+        if (b.x < 0.44) b.vx *= -1;
+        if (b.y > 0.55) b.vy *= -1;
+        if (b.y < 0.10) b.vy *= -1;
+      }
+      bee(b.x*W, b.y*H, H*0.024, t + i*1.3);
+    });
+  }
+
+  // ================================================================
+  //  SUMMER ELEMENTS  (p > 0.42)
+  // ================================================================
+  if (p > 0.42) {
+    var su = clamp((p - 0.42) / 0.38, 0, 1);
+
+    // ground flowers
+    var flowerData = [
+      [0.33,0.78,0,  18],[0.38,0.82,30, 18],[0.43,0.76,50, 16],
+      [0.50,0.80,330,17],[0.57,0.77,200,16],[0.62,0.83,280,18],
+      [0.67,0.79,0,  17],[0.72,0.74,55, 16],[0.77,0.81,330,17],
+    ];
+    flowerData.forEach(function(f) {
+      ctx.globalAlpha = su * 0.9;
+      flower(f[0]*W, f[1]*H, H*f[3]/1000, f[2]);
+      ctx.globalAlpha = 1;
+    });
+
+    // butterflies (move only with motion)
+    butterflies.forEach(function(bf, i) {
+      if (mv > 0.02) {
+        bf.x += bf.vx * mv;
+        bf.y += bf.vy * mv + Math.sin(t*1.1 + bf.phase) * 0.0006 * mv;
+        if (bf.x > 0.90) bf.vx *= -1;
+        if (bf.x < 0.08) bf.vx *= -1;
+        if (bf.y > 0.54) bf.vy *= -1;
+        if (bf.y < 0.12) bf.vy *= -1;
+      }
+      ctx.globalAlpha = su * 0.92;
+      butterfly(bf.x*W, bf.y*H, H*bf.size, bf.hue, t*3.2 + i*1.5);
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  // ================================================================
+  //  PRICE text  (drawn into the landscape)
+  // ================================================================
+  if (S.priceStr) {
+    var ty  = HORIZON + H * 0.14;
+    var fs2 = Math.floor(W * 0.044);
+
+    ctx.font          = '400 ' + fs2 + 'px Georgia, serif';
+    ctx.textAlign     = 'center';
+    ctx.textBaseline  = 'middle';
+
+    var txtC = sc(p, [188,215,240], [205,245,178], [255,242,138]);
+
+    // shadow
+    ctx.fillStyle = rgb(lc(0.5, txtC, [0,0,0]), 0.45);
+    ctx.fillText(S.priceStr, W*0.5 + 2, ty + 3);
+    // main
+    ctx.fillStyle = rgb(txtC, 0.90);
+    ctx.fillText(S.priceStr, W*0.5, ty);
+  }
+
+  // ================================================================
+  //  VIGNETTE
+  // ================================================================
+  var vig = ctx.createRadialGradient(W/2, H/2, W*0.08, W/2, H/2, W*0.80);
+  vig.addColorStop(0, 'transparent');
+  vig.addColorStop(1, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(draw);
+}
+
+// ================================================================
+//  FOOTER + API
+// ================================================================
+function fmt(n) {
+  return new Intl.NumberFormat('en-US', {
+    style:'currency', currency:'USD',
+    minimumFractionDigits:0, maximumFractionDigits:0
+  }).format(n);
+}
+function parseVal(s) {
+  return parseFloat(String(s).replace(/[^0-9.]/g, ''));
+}
+function recalc() {
+  var range  = S.high - S.low || 1;
+  S.pos      = clamp((S.price - S.low) / range, 0, 1);
+  S.vol      = clamp(range / S.price * 15, 0, 1);
+  S.targetPos = S.pos;
+  S.priceStr  = fmt(S.price) + ' USD';
+}
+function updFooter() {
+  document.getElementById('f-low').value   = fmt(S.low);
+  document.getElementById('f-high').value  = fmt(S.high);
+  document.getElementById('f-price').value = fmt(S.price);
+}
+function flashEl(el) {
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+function bindInput(el, key) {
+  el.addEventListener('focus', function() { el.value = Math.round(S[key]); el.select(); });
+  el.addEventListener('blur',  function() {
+    var v = parseVal(el.value);
+    if (!isNaN(v) && v > 0) { S[key] = v; recalc(); flashEl(el); }
+    updFooter();
+  });
+  el.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter')  el.blur();
+    if (e.key === 'Escape') { updFooter(); el.blur(); }
+  });
+}
+bindInput(document.getElementById('f-low'),   'low');
+bindInput(document.getElementById('f-price'), 'price');
+bindInput(document.getElementById('f-high'),  'high');
+
+var footer = document.getElementById('footer');
+
+function reveal() {
+  if (S.loaded) return;
+  S.loaded = true;
+  var l = document.getElementById('loader');
+  if (l) { l.classList.add('fade'); setTimeout(function(){ l.remove(); }, 1700); }
+  footer.classList.add('visible');
+}
+
+async function fetchData() {
+  try {
+    var ctrl  = new AbortController();
+    var timer = setTimeout(function(){ ctrl.abort(); }, 5000);
+    var r = await fetch(
+      'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin',
+      {signal: ctrl.signal}
+    );
+    clearTimeout(timer);
+    var d = await r.json();
+    var b = d[0];
+    S.price = b.current_price;
+    S.high  = b.high_24h;
+    S.low   = b.low_24h;
+    recalc();
+    updFooter();
+  } catch(e) {
+    // keep fallback values
+  }
+  reveal();
+}
+
+recalc();
+updFooter();
+var fb = setTimeout(function(){ reveal(); }, 800);
+fetchData().then(function(){ clearTimeout(fb); });
+setInterval(fetchData, 30000);
+
+draw();
+</script>
+</body>
+</html>
